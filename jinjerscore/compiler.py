@@ -31,6 +31,12 @@ class JinjerscoreGenerator(CodeGenerator):
             self.visit(arg, frame)
 
         if not python_call:
+            if node.kwargs or node.dyn_kwargs or extra_kwargs:
+                self.fail("Jinjerscore doesn't support function calls with keyword arguments",
+                          node.lineno)
+            if node.dyn_args:
+                self.fail("Jinjerscore doesn't support function calls with dynamic positional arguments",
+                          node.lineno)
             return
 
         # if any of the given keyword arguments is a python keyword
@@ -545,7 +551,7 @@ class JinjerscoreGenerator(CodeGenerator):
             else:
                 self.write('context.call(')
         self.visit(node.node, frame)
-        extra_kwargs = forward_caller and {'caller': 'caller'} or None
+        extra_kwargs = (python call and forward_caller) and {'caller': 'caller'} or None
         if not python_call:
             self.write('(')
         self.signature(node, frame, extra_kwargs, python_call)
