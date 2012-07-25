@@ -1,6 +1,7 @@
+from itertools import chain
 from jinja2 import nodes
 from jinja2.compiler import CodeGenerator, operators, find_undeclared
-from jinja2.utils import concat
+from jinja2.utils import concat, is_python_keyword
 
 
 js_non_output_nodes = set([nodes.Call])
@@ -23,11 +24,56 @@ class JinjerscoreGenerator(CodeGenerator):
         self._js_indentation = 0
         self._js_new_lines = 0
 
-    def signature(self, node, frame, extra_kwargs=None):
+    def signature(self, node, frame, extra_kwargs=None, python_call=False):
         for i, arg in enumerate(node.args):
-            if i != 0:
+            if i != 0 or python_call:
                 self.write(', ')
             self.visit(arg, frame)
+
+        if not python_call:
+            return
+
+        # if any of the given keyword arguments is a python keyword
+        # we have to make sure that no invalid call is created.
+        kwarg_workaround = False
+        for kwarg in chain((x.key for x in node.kwargs), extra_kwargs or ()):
+            if is_python_keyword(kwarg):
+                kwarg_workaround = True
+                break
+
+        if not kwarg_workaround:
+            for kwarg in node.kwargs:
+                self.write(', ')
+                self.visit(kwarg, frame)
+            if extra_kwargs is not None:
+                for key, value in extra_kwargs.iteritems():
+                    self.write(', %s=%s' % (key, value))
+        if node.dyn_args:
+            self.write(', *')
+            self.visit(node.dyn_args, frame)
+
+        if kwarg_workaround:
+            if node.dyn_kwargs is not None:
+                self.write(', **dict({')
+            else:
+                self.write(', **{')
+            for kwarg in node.kwargs:
+                self.write('%r: ' % kwarg.key)
+                self.visit(kwarg.value, frame)
+                self.write(', ')
+            if extra_kwargs is not None:
+                for key, value in extra_kwargs.iteritems():
+                    self.write('%r: %s, ' % (key, value))
+            if node.dyn_kwargs is not None:
+                self.write('}, **')
+                self.visit(node.dyn_kwargs, frame)
+                self.write(')')
+            else:
+                self.write('}')
+
+        elif node.dyn_kwargs is not None:
+            self.write(', **')
+            self.visit(node.dyn_kwargs, frame)
 
     def indent_js(self):
         self._js_indentation += 1
@@ -492,10 +538,17 @@ class JinjerscoreGenerator(CodeGenerator):
         self.write(')')
 
     def visit_Call(self, node, frame, forward_caller=False):
+        python_call = isinstance(node.node, nodes.ExtensionAttribute)
+        if python_call:
+            if self.environment.sandboxed:
+                self.write('environment.call(context, ')
+            else:
+                self.write('context.call(')
         self.visit(node.node, frame)
         extra_kwargs = forward_caller and {'caller': 'caller'} or None
-        self.write('(')
-        self.signature(node, frame, extra_kwargs)
+        if not python_call:
+            self.write('(')
+        self.signature(node, frame, extra_kwargs, python_call)
         self.write(')')
 
     # def visit_Keyword(self, node, frame):
