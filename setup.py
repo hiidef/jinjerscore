@@ -26,7 +26,7 @@ setup(
     author_email='brent@hiidef.com',
     url='http://github.com/hiidef/jinjerscore',
     license='LICENSE.txt',
-    packages=['jinjerscore'],
+    packages=['jinjerscore', 'jinjerscore.django'],
     scripts=[],
     install_requires=[
         'Jinja2 >= 2.6',
