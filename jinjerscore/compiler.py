@@ -25,7 +25,7 @@ class JinjerscoreGenerator(CodeGenerator):
         self._js_new_lines = 0
 
     def signature(self, node, frame, extra_kwargs=None, python_call=False):
-        write = python_call and self.write or lambda x: self.write_js(x, frame)
+        write = python_call and self.write or (lambda x: self.write_js(x, frame))
         for i, arg in enumerate(node.args):
             if i != 0 or python_call:
                 write(', ')
@@ -605,7 +605,7 @@ class JinjerscoreGenerator(CodeGenerator):
         if not python_call:
             self.write_js('(', frame)
         self.signature(node, frame, extra_kwargs, python_call)
-        write = python_call and self.write or lambda x: self.write_js(x, frame)
+        write = python_call and self.write or (lambda x: self.write_js(x, frame))
         write(')')
 
     # def visit_Keyword(self, node, frame):

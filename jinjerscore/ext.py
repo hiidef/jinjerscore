@@ -4,7 +4,6 @@ from jinja2.ext import Extension
 
 
 class JinjerscoreExtension(Extension):
-    # a set of names that trigger the extension.
     tags = set(['jinjerscore'])
 
     def __init__(self, environment):
