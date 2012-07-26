@@ -11,7 +11,7 @@ class JinjerscoreExtension(Extension):
         super(JinjerscoreExtension, self).__init__(environment)
         environment.extend(
             generate_underscore=False,
-            base_path=None,
+            underscore_base_path=None,
         )
 
     def parse(self, parser):
@@ -26,8 +26,7 @@ class JinjerscoreExtension(Extension):
             return body
 
     def _generate_underscore(self, path, caller):
-        import ipdb; ipdb.set_trace()
         rv = caller()
-        with open(os.path.join(self.environment.base_path, path), 'w') as f:
+        with open(os.path.join(self.environment.underscore_base_path, path), 'w') as f:
             f.write(rv)
         return rv

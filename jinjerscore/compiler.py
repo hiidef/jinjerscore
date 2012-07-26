@@ -25,9 +25,10 @@ class JinjerscoreGenerator(CodeGenerator):
         self._js_new_lines = 0
 
     def signature(self, node, frame, extra_kwargs=None, python_call=False):
+        write = python_call and self.write or lambda x: self.write_js(x, frame)
         for i, arg in enumerate(node.args):
             if i != 0 or python_call:
-                self.write(', ')
+                write(', ')
             self.visit(arg, frame)
 
         if not python_call:
@@ -81,41 +82,72 @@ class JinjerscoreGenerator(CodeGenerator):
             self.write(', **')
             self.visit(node.dyn_kwargs, frame)
 
+    def macro_body(self, node, frame, children=None):
+        """Dump the function def of a macro or call block."""
+        frame = self.function_scoping(node, frame, children)
+        # macros are delayed, they never require output checks
+        frame.require_output_check = False
+        args = frame.arguments
+        # XXX: this is an ugly fix for the loop nesting bug
+        # (tests.test_old_bugs.test_loop_call_bug).  This works around
+        # a identifier nesting problem we have in general.  It's just more
+        # likely to happen in loops which is why we work around it.  The
+        # real solution would be "nonlocal" all the identifiers that are
+        # leaking into a new python frame and might be used both unassigned
+        # and assigned.
+        if 'loop' in frame.identifiers.declared:
+            args = args + ['l_loop=l_loop']
+        self.writeline('def macro(%s):' % ', '.join(args), node)
+        self.indent()
+        self.buffer(frame)
+        self.pull_locals(frame)
+        self.blockvisit(node.body, frame)
+        self.return_buffer_contents(frame)
+        self.outdent()
+        return frame
+
     def indent_js(self):
         self._js_indentation += 1
 
     def outdent_js(self, step=1):
         self._js_indentation -= step
 
-    def writeline_js(self, x, node=None, extra=0, js_extra=0, whitespace=False, output=False, end=False):
+    def write_js(self, x, frame):
+        if frame.buffer is not None:
+            x = '%s.append("%s")' % (frame.buffer, x)
+            self.writeline(x)
+        else:
+            self.write(x)
+
+    def writeline_js(self, x, frame, node=None, extra=0, js_extra=0, whitespace=False, output=False, end=False):
         """Combination of newline and write."""
         self.newline(node, extra)
         self.newline_js(js_extra)
+        js_str = frame.buffer is None and 'yield u"' or ''
         if whitespace:
-            js_str = 'yield u"%s%s' % (
+            js_str += '%s%s' % (
                 '\\n' * self._js_new_lines,
                 '    ' * self._js_indentation,
             )
             self._js_new_lines = 0
-        else:
-            js_str = 'yield u"'
-        self.write(js_str)
-        self.write_js_stmt(x, node, output, end, end)
+        if js_str:
+            self.write_js(js_str, frame)
+        self.write_js_stmt(x, frame, node, output, end, end)
 
-    def write_js_stmt(self, x, node=None, output=False, end=False, end_quote=False):
-        self.write('<%')
+    def write_js_stmt(self, x, frame, node=None, output=False, end=False, end_quote=False):
+        self.write_js('<%', frame)
         if output:
-            self.write('=')
+            self.write_js('=', frame)
         x = ' ' + x
         if end:
-            self.write_js_stmt_end(x, node, end_quote)
+            self.write_js_stmt_end(x, frame, node, end_quote)
         else:
-            self.write(x)
+            self.write_js(x, frame)
 
-    def write_js_stmt_end(self, x, node=None, end_quote=False):
-        self.write(x + ' %>')
-        if end_quote:
-            self.write('"')
+    def write_js_stmt_end(self, x, frame, node=None, end_quote=False):
+        self.write_js(x + ' %>', frame)
+        if end_quote and frame.buffer is None:
+            self.write_js('"', frame)
 
     def newline_js(self, extra=0):
         """Add one or more newlines before the next write."""
@@ -144,84 +176,94 @@ class JinjerscoreGenerator(CodeGenerator):
         special_loop = 'l_loop' in find_undeclared(node.iter_child_nodes(only=('body',)), ('l_loop',))
 
         if node.recursive:
-            self.writeline_js('var loop = function(iter) {', node, whitespace=True, end=True)
+            self.writeline_js('var loop = function(iter) {', frame, node, whitespace=True, end=True)
             self.indent_js()
         if node.else_:
-            self.writeline_js('var %s = 1' % iteration_indicator, node, whitespace=True, end=True)
+            self.writeline_js('var %s = 1' % iteration_indicator, frame, node, whitespace=True, end=True)
 
         # If we're accessing the special loop variables and there's a filter test on the loop,
         # we need to do the filtering beforehand
         if special_loop and node.test is not None:
             filtered_var = self.temporary_identifier()
-            self.writeline_js('var %s = _.filter(' % filtered_var, node, whitespace=True)
+            self.writeline_js('var %s = _.filter(' % filtered_var, frame, node, whitespace=True)
             if node.recursive:
-                self.write('iter')
+                self.write_js('iter', frame)
             else:
                 self.visit(node.iter, frame)
-            self.write(', function(item) { return ')
+            self.write_js(', function(item) { return ', frame)
             self.visit(node.test, frame)
-            self.write_js_stmt_end(' })', end_quote=True)
-        self.writeline_js('_.each(', node, whitespace=True)
+            self.write_js_stmt_end(' })', frame, end_quote=True)
+        self.writeline_js('_.each(', frame, node, whitespace=True)
         if special_loop and node.test is not None:
-            self.write(filtered_var)
+            self.write_js(filtered_var, frame)
         elif node.recursive:
-            self.write('iter')
+            self.write_js('iter', frame)
         else:
             self.visit(node.iter, frame)
-        self.write(', ')
-        self.write('function(')
+        self.write_js(', ', frame)
+        self.write_js('function(', frame)
         self.visit(node.target, frame)
-        self.write_js_stmt_end(', index0, iter) {', end_quote=True)
+        self.write_js_stmt_end(', index0, iter) {', frame, end_quote=True)
         self.indent_js()
 
         # If we don't access the special loop variables inside this loop, then any filtering of the
         # collection becomes a continue
         if not special_loop and node.test is not None:
-            self.writeline_js('if(!(', node, whitespace=True)
+            self.writeline_js('if(!(', frame, node, whitespace=True)
             self.visit(node.test, frame)
-            self.write_js_stmt_end(')) { continue; }', end_quote=True)
+            self.write_js_stmt_end(')) { continue; }', frame, end_quote=True)
         if special_loop:
-            self.writeline_js('var l_loop = {index0: index0, index: index0 + 1, first: index0 == 0, length: iter.length}', node, whitespace=True, end=True)
-            self.writeline_js('l_loop.revindex = iter.length - l_loop.index0', node, whitespace=True, end=True)
-            self.writeline_js('l_loop.revindex0 = l_loop.revindex - 1', node, whitespace=True, end=True)
-            self.writeline_js('l_loop.last = l_loop.revindex0 == 0', node, whitespace=True, end=True)
-            self.writeline_js('l_loop.cycle = function() { return arguments.length ? arguments[index0 % arguments.length] : \'\' }}', whitespace=True, end=True)
+            self.writeline_js('var l_loop = {index0: index0, index: index0 + 1, first: index0 == 0, length: iter.length}', frame, node, whitespace=True, end=True)
+            self.writeline_js('l_loop.revindex = iter.length - l_loop.index0', frame, node, whitespace=True, end=True)
+            self.writeline_js('l_loop.revindex0 = l_loop.revindex - 1', frame, node, whitespace=True, end=True)
+            self.writeline_js('l_loop.last = l_loop.revindex0 == 0', frame, node, whitespace=True, end=True)
+            self.writeline_js('l_loop.cycle = function() { return arguments.length ? arguments[index0 % arguments.length] : \'\' }}', frame, node, whitespace=True, end=True)
         for body_node in node.body:
             self.visit(body_node, frame)
         if node.else_:
-            self.writeline_js('%s = 0' % iteration_indicator, node, whitespace=True, end=True)
+            self.writeline_js('%s = 0' % iteration_indicator, frame, node, whitespace=True, end=True)
 
         self.outdent_js()
-        self.writeline_js('})', node, whitespace=True, end=True)
+        self.writeline_js('})', frame, node, whitespace=True, end=True)
         if node.else_:
-            self.writeline_js('if(%s) {' % iteration_indicator, node, whitespace=True, end=True)
+            self.writeline_js('if(%s) {' % iteration_indicator, frame, node, whitespace=True, end=True)
             self.indent_js()
             for else_node in node.else_:
                 self.visit(else_node, frame)
             self.outdent_js()
-            self.writeline_js('}', node, whitespace=True, end=True)
+            self.writeline_js('}', frame, node, whitespace=True, end=True)
         if node.recursive:
             self.outdent_js()
-            self.writeline_js('}', end=True, whitespace=True)
-            self.writeline_js('loop(', node, whitespace=True)
+            self.writeline_js('}', frame, end=True, whitespace=True)
+            self.writeline_js('loop(', frame, node, whitespace=True)
             self.visit(node.iter, frame)
-            self.write_js_stmt_end(')', end_quote=True)
+            self.write_js_stmt_end(')', frame, end_quote=True)
 
     def visit_If(self, node, frame):
         if_frame = frame.soft()
-        self.writeline_js('if(', node)
+        self.writeline_js('if(', frame, node)
         self.visit(node.test, if_frame)
-        self.write_js_stmt_end(') {', end_quote=True)
+        self.write_js_stmt_end(') {', frame, end_quote=True)
         self.indent_js()
         self.blockvisit(node.body, if_frame)
         self.outdent_js()
-        self.writeline_js('}', whitespace=True)
+        self.writeline_js('}', frame, whitespace=True)
         if node.else_:
-            self.write_js_stmt_end('else {', end_quote=True)
+            self.write_js_stmt_end('else {', frame, end_quote=True)
             self.indent_js()
             self.blockvisit(node.else_, if_frame)
-            self.writeline_js('}', whitespace=True)
-        self.write_js_stmt_end('', end_quote=True)
+            self.writeline_js('}', frame, whitespace=True)
+        self.write_js_stmt_end('', frame, end_quote=True)
+
+    def visit_CallBlock(self, node, frame):
+        children = node.iter_child_nodes(exclude=('call',))
+        call_frame = self.macro_body(node, frame, children)
+        self.writeline('caller = ')
+        self.macro_def(node, call_frame)
+        self.start_write(frame, node)
+        call_frame.buffer = None
+        self.visit_Call(node.call, call_frame, forward_caller=True)
+        self.end_write(frame)
 
     def visit_Output(self, node, frame):
         # if we have a known extends statement, we don't output anything
@@ -295,7 +337,10 @@ class JinjerscoreGenerator(CodeGenerator):
                     if item.__class__ not in js_non_output_nodes:
                         self.write('=')
                     self.write(' ')
+                    buffer_cache = frame.buffer
+                    frame.buffer = None
                     self.visit(item, frame)
+                    frame.buffer = buffer_cache
                     self.write(' %>"')
                     if frame.buffer is not None:
                         self.write(', ')
@@ -324,7 +369,10 @@ class JinjerscoreGenerator(CodeGenerator):
                 if argument.__class__ not in js_non_output_nodes:
                     self.write('=')
                 self.write(' ')
+                buffer_cache = frame.buffer
+                frame.buffer = None
                 self.visit(argument, frame)
+                frame.buffer = buffer_cache
                 self.write(' %>",')
             self.outdent()
             self.writeline(')')
@@ -334,28 +382,30 @@ class JinjerscoreGenerator(CodeGenerator):
 
     def visit_Assign(self, node, frame):
         self.newline(node)
-        if frame.toplevel:
-            assignment_frame = frame.copy()
-            assignment_frame.toplevel_assignments = set()
-        else:
-            assignment_frame = frame
-        self.writeline_js('var ')
-        self.visit(node.target, assignment_frame)
-        self.write(' = ')
+        self.writeline_js('var ', frame, node)
+        self.visit(node.target, frame)
+        self.write_js(' = ', frame)
         self.visit(node.node, frame)
-        self.write_js_stmt_end('', end_quote=True)
+        self.write_js_stmt_end('', frame, end_quote=True)
 
     # -- Expression Visitors
 
     def visit_Name(self, node, frame):
-        self.write(node.name)
+        self.write_js(node.name, frame)
+
+    def visit_Const(self, node, frame):
+        val = node.value
+        if isinstance(val, float):
+            self.write_js(str(val), frame)
+        else:
+            self.write_js(repr(val), frame)
 
     def visit_List(self, node, frame):
         self.write('[')
         for idx, item in enumerate(node.items):
-            if idx and idx != len(node.items) - 1:
-                self.write(', ')
             self.visit(item, frame)
+            if idx != len(node.items) - 1:
+                self.write_js(', ', frame)
         self.write(']')
 
     visit_Tuple = visit_List
@@ -372,11 +422,11 @@ class JinjerscoreGenerator(CodeGenerator):
                 self.write(', ')
                 self.visit(node.right, frame)
             else:
-                self.write('(')
+                self.write_js('(', frame)
                 self.visit(node.left, frame)
-                self.write(' %s ' % operator)
+                self.write_js(' %s ' % operator, frame)
                 self.visit(node.right, frame)
-            self.write(')')
+            self.write_js(')', frame)
         return visitor
 
     def uaop(operator, interceptable=True):
@@ -387,9 +437,9 @@ class JinjerscoreGenerator(CodeGenerator):
                 self.write('environment.call_unop(context, %r, ' % operator)
                 self.visit(node.node, frame)
             else:
-                self.write('(' + operator)
+                self.write_js('(' + operator, frame)
                 self.visit(node.node, frame)
-            self.write(')')
+            self.write_js(')', frame)
         return visitor
 
     visit_And = binop('&&', interceptable=False)
@@ -405,11 +455,11 @@ class JinjerscoreGenerator(CodeGenerator):
             self.write(', ')
             self.visit(node.right, frame)
         else:
-            self.write('~~(')
+            self.write_js('~~(', frame)
             self.visit(node.left, frame)
-            self.write(' / ')
+            self.write_js(' / ', frame)
             self.visit(node.right, frame)
-        self.write(')')
+        self.write_js(')', frame)
 
     def visit_Pow(self, node, frame):
         if self.environment.sandboxed and operator in self.environment.intercepted_binops:
@@ -419,19 +469,19 @@ class JinjerscoreGenerator(CodeGenerator):
             self.write(', ')
             self.visit(node.right, frame)
         else:
-            self.write('Math.pow(')
+            self.write_js('Math.pow(', frame)
             self.visit(node.left, frame)
-            self.write(', ')
+            self.write_js(', ', frame)
             self.visit(node.right, frame)
-        self.write(')')
+        self.write_js(')', frame)
 
     def visit_Concat(self, node, frame):
-        self.write('[')
+        self.write_js('[', frame)
         for i, arg in enumerate(node.nodes):
             self.visit(arg, frame)
             if i < len(node.nodes) - 1:
-                self.write(', ')
-        self.write('].join(\'\')')
+                self.write_js(', ', frame)
+        self.write_js('].join(\'\')', frame)
 
     def visit_Compare(self, node, frame):
         # since underscore's in/not in semantics differ syntactically
@@ -445,23 +495,23 @@ class JinjerscoreGenerator(CodeGenerator):
         for op in node.ops:
             if op.op in ['in', 'notin']:
                 if op.op == 'notin':
-                    self.write('!')
-                self.write('(_.indexOf(')
+                    self.write_js('!', frame)
+                self.write_js('(_.indexOf(', frame)
                 self.visit(op, frame)
-                self.write(', ')
+                self.write_js(', ', frame)
                 self.visit(node.expr, frame)
-                self.write(') != -1)')
+                self.write_js(') != -1)', frame)
             else:
                 self.visit(op, frame)
 
     def visit_Operand(self, node, frame):
         if node.op not in ['in', 'notin']:
-            self.write(' %s ' % operators[node.op])
+            self.write_js(' %s ' % operators[node.op], frame)
         self.visit(node.expr, frame)
 
     def visit_Getattr(self, node, frame):
         self.visit(node.node, frame)
-        self.write('[%r]' % node.attr)
+        self.write_js('[%r]' % node.attr, frame)
 
     def visit_Getitem(self, node, frame):
         if isinstance(node.arg, nodes.Slice):
@@ -470,28 +520,28 @@ class JinjerscoreGenerator(CodeGenerator):
             # the result of the sequential slice. As a result, we
             # have the 'step' logic here, rather than in visit_Slice
             if node.arg.step is not None:
-                self.write('_.filter(')
+                self.write_js('_.filter(', frame)
             self.visit(node.node, frame)
-            self.write('.slice(')
+            self.write_js('.slice(', frame)
             self.visit(node.arg, frame)
-            self.write(')')
+            self.write_js(')', frame)
             if node.arg.step is not None:
-                self.write(', function(item, idx) { return idx % ')
+                self.write_js(', function(item, idx) { return idx % ', frame)
                 self.visit(node.arg.step, frame)
-                self.write(' })')
+                self.write_js(' })', frame)
         else:
             self.visit(node.node, frame)
-            self.write('[')
+            self.write_js('[', frame)
             self.visit(node.arg, frame)
-            self.write(']')
+            self.write_js(']', frame)
 
     def visit_Slice(self, node, frame):
         if node.start is not None:
             self.visit(node.start, frame)
         else:
-            self.write('0')
+            self.write_js('0', frame)
         if node.stop is not None:
-            self.write(', ')
+            self.write_js(', ', frame)
             self.visit(node.stop, frame)
 
     # def visit_Filter(self, node, frame):
@@ -535,13 +585,13 @@ class JinjerscoreGenerator(CodeGenerator):
                 return self.visit(node.expr2, frame)
             self.write('throw "the ternary expression on %s evaluated to false and '
                        'no else section was defined."' % self.position(node))
-        self.write('(')
+        self.write_js('(', frame)
         self.visit(node.test, frame)
-        self.write(' ? ')
+        self.write_js(' ? ', frame)
         self.visit(node.expr1, frame)
-        self.write(' : ')
+        self.write_js(' : ', frame)
         write_expr2()
-        self.write(')')
+        self.write_js(')', frame)
 
     def visit_Call(self, node, frame, forward_caller=False):
         python_call = isinstance(node.node, nodes.ExtensionAttribute)
@@ -551,11 +601,12 @@ class JinjerscoreGenerator(CodeGenerator):
             else:
                 self.write('context.call(')
         self.visit(node.node, frame)
-        extra_kwargs = (python call and forward_caller) and {'caller': 'caller'} or None
+        extra_kwargs = (python_call and forward_caller) and {'caller': 'caller'} or None
         if not python_call:
-            self.write('(')
+            self.write_js('(', frame)
         self.signature(node, frame, extra_kwargs, python_call)
-        self.write(')')
+        write = python_call and self.write or lambda x: self.write_js(x, frame)
+        write(')')
 
     # def visit_Keyword(self, node, frame):
     #     self.write(node.key + '=')
